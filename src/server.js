@@ -25,7 +25,26 @@ initSsxmodManager()
 
 app.use(bodyParser.json({ limit: '128mb' }))
 app.use(bodyParser.urlencoded({ limit: '128mb', extended: true }))
-app.use(cors())
+
+// Configure CORS for better file upload support from other websites
+app.use(cors({
+  origin: true, // Allow all origins (equivalent to cors() but more explicit)
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type', 
+    'Authorization', 
+    'X-API-Key', 
+    'X-Goog-API-Key', 
+    'x-request-id', 
+    'User-Agent'
+  ],
+  exposedHeaders: ['Content-Disposition'],
+  maxAge: 86400 // 24 hours for preflight cache
+}))
+
+// Handle OPTIONS requests explicitly (for preflight)
+app.options('*', cors())
 
 // Health check
 app.get('/', (req, res) => {
