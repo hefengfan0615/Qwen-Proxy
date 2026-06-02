@@ -72,7 +72,19 @@ const findMatchedModel = (models, modelName) => {
  * @param {object} item - Content item
  * @returns {boolean} Whether it's a media content item
  */
-const isMediaContentItem = (item) => ['image', 'image_url', 'video', 'video_url', 'input_video'].includes(item?.type)
+const isMediaContentItem = (item) => {
+    if (!item) return false
+    // Check by type
+    if (['image', 'image_url', 'video', 'video_url', 'input_video'].includes(item?.type)) {
+        return true
+    }
+    // Check by presence of media fields even without type
+    if (item.image_url || item.image || item.video_url || item.video || item.input_video) {
+        logger.info('Found media content item without explicit type', 'CHAT_HELPERS')
+        return true
+    }
+    return false
+}
 
 /**
  * Extract media descriptor
@@ -82,10 +94,14 @@ const isMediaContentItem = (item) => ['image', 'image_url', 'video', 'video_url'
 const getMediaDescriptor = (item) => {
     if (!item) return null
 
+    logger.info(`getMediaDescriptor: checking item type=${item.type}`, 'CHAT_HELPERS')
+
     if (item.type === 'image' || item.type === 'image_url') {
+        const url = item.image || item.url || item.image_url?.url || item.source?.data || null
+        logger.info(`Found image, url length: ${url?.length || 0}`, 'CHAT_HELPERS')
         return {
             mediaType: 'image',
-            url: item.image || item.url || item.image_url?.url || null
+            url: url
         }
     }
 
@@ -100,6 +116,15 @@ const getMediaDescriptor = (item) => {
         return {
             mediaType: 'video',
             url: item.input_video?.url || item.input_video?.video_url || item.video_url?.url || null
+        }
+    }
+
+    // Also check for direct base64 data without type
+    if (item.image_url?.url) {
+        logger.info('Found image_url object without explicit type', 'CHAT_HELPERS')
+        return {
+            mediaType: 'image',
+            url: item.image_url.url
         }
     }
 
@@ -126,37 +151,64 @@ const buildNormalizedMediaItem = (mediaType, url) => {
  * @returns {Promise<object|null>} Normalized media content item
  */
 const normalizeMediaContentItem = async (item, imgCacheManager) => {
+    logger.info(`normalizeMediaContentItem: processing item`, 'CHAT_HELPERS')
     const mediaDescriptor = getMediaDescriptor(item)
-    if (!mediaDescriptor?.url) return null
+    if (!mediaDescriptor?.url) {
+        logger.info('No media descriptor found or no URL', 'CHAT_HELPERS')
+        return null
+    }
 
     const { mediaType, url } = mediaDescriptor
+    logger.info(`Processing ${mediaType}, URL starts with: ${url.substring(0, 50)}...`, 'CHAT_HELPERS')
+    
     if (HTTP_URL_REGEX.test(url)) {
+        logger.info('URL is HTTP, passing through', 'CHAT_HELPERS')
         return buildNormalizedMediaItem(mediaType, url)
     }
 
-    const matchedDataURI = url.match(DATA_URI_REGEX)
-    if (!matchedDataURI) {
-        return buildNormalizedMediaItem(mediaType, url)
+    let matchedDataURI = url.match(DATA_URI_REGEX)
+    let mimeType = null
+    let base64Content = null
+
+    if (matchedDataURI) {
+        mimeType = matchedDataURI[1]
+        base64Content = matchedDataURI[2]
+        logger.info(`Found data URI with mimeType: ${mimeType}`, 'CHAT_HELPERS')
+    } else {
+        // If not a proper data URI, check if it's just raw base64
+        logger.info('Not a standard data URI, checking if it is raw base64', 'CHAT_HELPERS')
+        // Check if it looks like base64
+        if (/^[A-Za-z0-9+/=]+$/.test(url)) {
+            base64Content = url
+            mimeType = mediaType === 'image' ? 'image/jpeg' : 'video/mp4' // Default
+            logger.info(`Using raw base64 with default mimeType: ${mimeType}`, 'CHAT_HELPERS')
+        } else {
+            logger.info('Not base64 either, returning as-is', 'CHAT_HELPERS')
+            return buildNormalizedMediaItem(mediaType, url)
+        }
     }
 
-    const mimeType = matchedDataURI[1]
-    const base64Content = matchedDataURI[2]
     const fileExtension = mimeType?.split('/')[1] || (mediaType === 'video' ? 'mp4' : 'png')
     const filename = `${generateUUID()}.${fileExtension}`
     const signature = sha256Encrypt(base64Content)
 
     try {
         if (mediaType === 'image' && imgCacheManager.cacheIsExist(signature)) {
+            logger.info('Image found in cache', 'CHAT_HELPERS')
             return buildNormalizedMediaItem(mediaType, imgCacheManager.getCache(signature).url)
         }
 
         const buffer = Buffer.from(base64Content, 'base64')
+        logger.info(`Uploading ${buffer.length} bytes to Qwen OSS`, 'CHAT_HELPERS')
         const uploadResult = await uploadFileToQwenOss(buffer, filename, accountManager.getAccountToken())
 
         if (!uploadResult || uploadResult.status !== 200) {
+            logger.error('Upload to Qwen OSS failed', 'UPLOAD')
             return null
         }
 
+        logger.info(`Upload successful, file URL: ${uploadResult.file_url}`, 'CHAT_HELPERS')
+        
         if (mediaType === 'image') {
             imgCacheManager.addCache(signature, uploadResult.file_url)
         }

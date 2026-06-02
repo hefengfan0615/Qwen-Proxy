@@ -54,6 +54,16 @@ const processRequestBody = async (req, res, next) => {
       try { await accountManager.ensureInitialized() } catch { /* fall through */ }
     }
 
+    // Log request details for debugging
+    logger.info(`Request content-type: ${req.get('content-type')}`, 'MIDDLEWARE');
+    logger.info(`Has req.files: ${!!req.files && req.files.length > 0}`, 'MIDDLEWARE');
+    if (req.files && req.files.length > 0) {
+      logger.info(`Files count: ${req.files.length}`, 'MIDDLEWARE');
+      req.files.forEach((file, i) => {
+        logger.info(`  File ${i}: ${file.originalname || file.filename}, ${file.mimetype}, ${file.size} bytes`, 'MIDDLEWARE');
+      });
+    }
+
     // Handle both application/json and multipart/form-data requests
     let requestData = req.body;
     
@@ -61,13 +71,32 @@ const processRequestBody = async (req, res, next) => {
     if (req.is('multipart/form-data') && req.body.data) {
       try {
         requestData = JSON.parse(req.body.data);
+        logger.info('Parsed form-data JSON successfully', 'MIDDLEWARE');
       } catch (e) {
         logger.error('Failed to parse form-data JSON', 'MIDDLEWARE', '', e);
       }
     }
 
+    // Log the parsed request data (sanitized)
+    logger.info(`Request model: ${requestData.model}`, 'MIDDLEWARE');
+    logger.info(`Request messages length: ${requestData.messages?.length || 0}`, 'MIDDLEWARE');
+    if (requestData.messages && requestData.messages.length > 0) {
+      const lastMsg = requestData.messages[requestData.messages.length - 1];
+      logger.info(`Last message role: ${lastMsg.role}`, 'MIDDLEWARE');
+      if (Array.isArray(lastMsg.content)) {
+        logger.info(`Last message content is array, length: ${lastMsg.content.length}`, 'MIDDLEWARE');
+        lastMsg.content.forEach((item, i) => {
+          logger.info(`  Content item ${i}: type=${item.type}, has_image=${!!item.image_url || !!item.image}`, 'MIDDLEWARE');
+        });
+      } else {
+        logger.info(`Last message content is string: ${typeof lastMsg.content === 'string' ? lastMsg.content.substring(0, 100) : typeof lastMsg.content}`, 'MIDDLEWARE');
+      }
+    }
+
     // Process uploaded files if any
     if (req.files && req.files.length > 0) {
+      logger.info(`Processing ${req.files.length} uploaded files`, 'MIDDLEWARE');
+      
       // Convert uploaded files to base64 and add to messages
       // We'll need to check if requestData.messages exists and process it
       if (!requestData.messages) {
@@ -79,6 +108,8 @@ const processRequestBody = async (req, res, next) => {
       for (const file of req.files) {
         const base64Data = file.buffer.toString('base64');
         const dataUrl = `data:${file.mimetype};base64,${base64Data}`;
+        
+        logger.info(`Processing file ${file.originalname || file.filename}, mimetype: ${file.mimetype}`, 'MIDDLEWARE');
         
         if (file.mimetype.startsWith('image/')) {
           fileAttachments.push({
@@ -94,20 +125,42 @@ const processRequestBody = async (req, res, next) => {
       }
 
       // If we have files and messages, attach them to the last user message
-      if (fileAttachments.length > 0 && requestData.messages.length > 0) {
-        const lastMsg = requestData.messages[requestData.messages.length - 1];
-        if (lastMsg.role === 'user') {
-          if (typeof lastMsg.content === 'string') {
-            // Convert string content to array with text and files
-            lastMsg.content = [
-              { type: 'text', text: lastMsg.content },
-              ...fileAttachments
-            ];
-          } else if (Array.isArray(lastMsg.content)) {
-            // Add files to existing content array
-            lastMsg.content = [...lastMsg.content, ...fileAttachments];
-          }
+      if (fileAttachments.length > 0) {
+        // Ensure we have at least one message
+        if (requestData.messages.length === 0) {
+          requestData.messages.push({
+            role: 'user',
+            content: []
+          });
         }
+        
+        const lastMsg = requestData.messages[requestData.messages.length - 1];
+        
+        // If last message is not user, create a new one
+        if (lastMsg.role !== 'user') {
+          requestData.messages.push({
+            role: 'user',
+            content: []
+          });
+        }
+        
+        const targetMsg = requestData.messages[requestData.messages.length - 1];
+        
+        if (typeof targetMsg.content === 'string') {
+          // Convert string content to array with text and files
+          targetMsg.content = [
+            { type: 'text', text: targetMsg.content },
+            ...fileAttachments
+          ];
+        } else if (Array.isArray(targetMsg.content)) {
+          // Add files to existing content array
+          targetMsg.content = [...targetMsg.content, ...fileAttachments];
+        } else {
+          // If content is not string or array, just use the files
+          targetMsg.content = fileAttachments;
+        }
+        
+        logger.info(`Attached ${fileAttachments.length} files to message`, 'MIDDLEWARE');
       }
     }
 
