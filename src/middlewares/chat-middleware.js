@@ -49,9 +49,66 @@ const processRequestBody = async (req, res, next) => {
     // uploadFileToQwenOss needs a token; without this guard the very
     // first concurrent requests on a Vercel cold start fail with
     // "Missing required upload parameters" and the user sees the model
-    // get a [image] text placeholder instead of the real image.
+    // get a "[image]" text placeholder instead of the real image.
     if (typeof accountManager.ensureInitialized === 'function') {
       try { await accountManager.ensureInitialized() } catch { /* fall through */ }
+    }
+
+    // Handle both application/json and multipart/form-data requests
+    let requestData = req.body;
+    
+    // If it's a form-data request, parse the JSON from the 'data' field if present
+    if (req.is('multipart/form-data') && req.body.data) {
+      try {
+        requestData = JSON.parse(req.body.data);
+      } catch (e) {
+        logger.error('Failed to parse form-data JSON', 'MIDDLEWARE', '', e);
+      }
+    }
+
+    // Process uploaded files if any
+    if (req.files && req.files.length > 0) {
+      // Convert uploaded files to base64 and add to messages
+      // We'll need to check if requestData.messages exists and process it
+      if (!requestData.messages) {
+        requestData.messages = [];
+      }
+
+      // For each file, convert to base64 data URL
+      const fileAttachments = [];
+      for (const file of req.files) {
+        const base64Data = file.buffer.toString('base64');
+        const dataUrl = `data:${file.mimetype};base64,${base64Data}`;
+        
+        if (file.mimetype.startsWith('image/')) {
+          fileAttachments.push({
+            type: 'image_url',
+            image_url: { url: dataUrl }
+          });
+        } else if (file.mimetype.startsWith('video/')) {
+          fileAttachments.push({
+            type: 'input_video',
+            input_video: { url: dataUrl }
+          });
+        }
+      }
+
+      // If we have files and messages, attach them to the last user message
+      if (fileAttachments.length > 0 && requestData.messages.length > 0) {
+        const lastMsg = requestData.messages[requestData.messages.length - 1];
+        if (lastMsg.role === 'user') {
+          if (typeof lastMsg.content === 'string') {
+            // Convert string content to array with text and files
+            lastMsg.content = [
+              { type: 'text', text: lastMsg.content },
+              ...fileAttachments
+            ];
+          } else if (Array.isArray(lastMsg.content)) {
+            // Add files to existing content array
+            lastMsg.content = [...lastMsg.content, ...fileAttachments];
+          }
+        }
+      }
     }
 
     const body = {
@@ -74,7 +131,7 @@ const processRequestBody = async (req, res, next) => {
       thinking_budget,
       reasoning_effort,
       size
-    } = req.body
+    } = requestData
 
     // Process stream parameter
     if (stream === true || stream === 'true') {

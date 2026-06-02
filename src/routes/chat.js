@@ -38,6 +38,7 @@ const selectChatCompletion = (req, res, next) => {
 
 router.post('/v1/chat/completions',
     apiKeyVerify,
+    upload.any(),
     processRequestBody,
     selectChatCompletion
 )
