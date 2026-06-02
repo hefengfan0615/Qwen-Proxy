@@ -48,7 +48,8 @@ function buildApiContent(msg) {
   const parts = []
   if (msg.content) parts.push({ type: 'text', text: msg.content })
   for (const att of msg.attachments) {
-    if (att.type === 'image') {
+    if (att.type === 'image' && att.data) {
+      // 优先使用 data 字段（向后兼容），否则忽略
       parts.push({ type: 'image_url', image_url: { url: att.data } })
     }
   }
@@ -68,7 +69,20 @@ export function useChat() {
 
   const activeConversation = conversations.find(c => c.id === activeId) || null
 
-  useEffect(() => { saveConversations(conversations) }, [conversations])
+  // 防抖保存对话（避免每次输入都序列化大对象）
+  const saveTimerRef = useRef(null)
+  useEffect(() => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current)
+    }
+    saveTimerRef.current = setTimeout(() => {
+      saveConversations(conversations)
+    }, 300)
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    }
+  }, [conversations])
+
   useEffect(() => { if (activeId) setActiveConversationId(activeId) }, [activeId])
 
   const changeModel = useCallback((model) => {
@@ -92,9 +106,7 @@ export function useChat() {
     })
   }, [])
 
-  // Compose the model id sent to the server: append -thinking / -search
-  // suffixes based on the toggle state. Selectable models in the UI are
-  // always base ids (suffixes are stripped in ModelSelector).
+  // Compose the model id sent to the server
   const composeModel = useCallback(() => {
     let m = (selectedModel || DEFAULT_MODEL).replace(/(?:-(?:thinking|search))+$/, '')
     if (enableThinking) m += '-thinking'
@@ -120,6 +132,7 @@ export function useChat() {
   }, [activeId])
 
   // 内部：执行一次流式请求，由调用方提供完成/失败处理
+  // 关键优化：使用 requestAnimationFrame 节流 setState，减少 React 重渲染次数
   const runStream = useCallback(async (messagesForApi, onComplete, onError) => {
     setIsStreaming(true)
     setStreamingContent('')
@@ -127,6 +140,28 @@ export function useChat() {
 
     let fullContent = ''
     let fullReasoning = ''
+
+    // 渲染调度：使用 ref 累积内容，rAF 批量提交到 state
+    const pendingContentUpdate = { value: '' }
+    const pendingReasoningUpdate = { value: '' }
+    let rafId = null
+    let firstChunkArrived = false
+
+    const scheduleRender = () => {
+      if (rafId !== null) return
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        if (pendingContentUpdate.value) {
+          setStreamingContent(pendingContentUpdate.value)
+          pendingContentUpdate.value = ''
+        }
+        if (pendingReasoningUpdate.value) {
+          setStreamingReasoning(pendingReasoningUpdate.value)
+          pendingReasoningUpdate.value = ''
+        }
+      })
+    }
+
     const controller = new AbortController()
     abortRef.current = controller
 
@@ -137,18 +172,34 @@ export function useChat() {
         (chunk, type) => {
           if (type === 'reasoning') {
             fullReasoning += chunk
-            setStreamingReasoning(fullReasoning)
+            pendingReasoningUpdate.value = fullReasoning
           } else {
             fullContent += chunk
-            setStreamingContent(fullContent)
+            pendingContentUpdate.value = fullContent
+          }
+          // 首字优先：第一个 chunk 立即刷新，不等 rAF
+          if (!firstChunkArrived) {
+            firstChunkArrived = true
+            if (pendingContentUpdate.value) setStreamingContent(pendingContentUpdate.value)
+            if (pendingReasoningUpdate.value) setStreamingReasoning(pendingReasoningUpdate.value)
+            pendingContentUpdate.value = ''
+            pendingReasoningUpdate.value = ''
+          } else {
+            scheduleRender()
           }
         },
         () => {
+          // 取消任何挂起的 rAF
+          if (rafId !== null) {
+            cancelAnimationFrame(rafId)
+            rafId = null
+          }
           onComplete({ content: fullContent, reasoning_content: fullReasoning || undefined })
         },
         controller.signal
       )
     } catch (err) {
+      if (rafId !== null) cancelAnimationFrame(rafId)
       if (err.name !== 'AbortError') onError?.(err)
     } finally {
       setIsStreaming(false)
@@ -159,7 +210,6 @@ export function useChat() {
   }, [composeModel])
 
   const sendMessage = useCallback(async (content, attachments = []) => {
-    // Require an explicit "new chat" before sending — no implicit creation.
     if (!activeId) return
     const convId = activeId
     const convs = conversations
@@ -193,7 +243,7 @@ export function useChat() {
     const newUserApiContent = attachments.length > 0
       ? [
           ...(content ? [{ type: 'text', text: content }] : []),
-          ...attachments.filter(a => a.type === 'image').map(a => ({
+          ...attachments.filter(a => a.type === 'image' && a.data).map(a => ({
             type: 'image_url',
             image_url: { url: a.data }
           }))

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import { parseMessageContent, renderMarkdown } from '../utils/markdown'
 import ThinkingBlock from './ThinkingBlock'
 
@@ -10,6 +10,7 @@ export default function MessageBubble({
   showRetry = false,
 }) {
   const [copied, setCopied] = useState(false)
+  const [imageErrors, setImageErrors] = useState({})
   const isUser = message.role === 'user'
   const isError = message.isError
 
@@ -21,25 +22,54 @@ export default function MessageBubble({
     : 0
   const activeVersion = versionCount > 0 ? versions[versionIndex] : null
 
-  // 取当前显示内容：优先版本中的内容，否则回退到 message.content
-  let thinking = (activeVersion?.reasoning_content) ?? message.reasoning_content ?? null
-  let mainContent = (activeVersion?.content) ?? message.content ?? ''
-  let html = ''
-
-  if (!isUser) {
-    if (!thinking && mainContent) {
-      const parsed = parseMessageContent(mainContent)
-      thinking = parsed.thinking
-      mainContent = mainContent.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+  // 使用 useMemo 缓存派生内容，避免每次渲染重新计算
+  const { thinking, mainContent, html } = useMemo(() => {
+    if (isUser) {
+      return { thinking: null, mainContent: message.content ?? '', html: '' }
     }
-    html = renderMarkdown(mainContent)
-  }
 
-  const handleCopy = async () => {
-    await navigator.clipboard.writeText(activeVersion?.content ?? message.content ?? '')
+    let t = activeVersion?.reasoning_content ?? message.reasoning_content ?? null
+    let m = activeVersion?.content ?? message.content ?? ''
+    let h = ''
+
+    if (!t && m) {
+      const parsed = parseMessageContent(m)
+      t = parsed.thinking
+      m = m.replace(/<think>[\s\S]*?<\/think>/g, '').trim()
+    }
+    h = renderMarkdown(m)
+
+    return { thinking: t, mainContent: m, html: h }
+  }, [isUser, activeVersion, message.content, message.reasoning_content])
+
+  const handleCopy = useCallback(async () => {
+    const text = activeVersion?.content ?? message.content ?? ''
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      // 降级方案
+      const ta = document.createElement('textarea')
+      ta.value = text
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
-  }
+  }, [activeVersion, message.content])
+
+  const handleImageError = useCallback((index) => {
+    setImageErrors(prev => ({ ...prev, [index]: true }))
+  }, [])
+
+  // 用户消息文本：限制超长文本溢出
+  const userText = useMemo(() => {
+    if (isUser && typeof message.content === 'string' && message.content.length > 10000) {
+      return message.content.substring(0, 10000) + '...'
+    }
+    return message.content
+  }, [isUser, message.content])
 
   return (
     <div className={`flex gap-3 animate-fade-in ${isUser ? 'justify-end' : 'justify-start'}`}>
@@ -52,10 +82,10 @@ export default function MessageBubble({
         </div>
       )}
 
-      {/* Message content */}
-      <div className={`max-w-[80%] group relative ${isUser ? 'order-first' : ''}`}>
+      {/* Message content - 使用 min-w-0 防止 flex 子项溢出 */}
+      <div className={`min-w-0 max-w-[80%] group relative ${isUser ? 'order-first' : ''}`}>
         <div
-          className={`px-4 py-3 rounded-2xl ${
+          className={`px-4 py-3 rounded-2xl break-words overflow-hidden ${
             isUser
               ? 'bg-accent-primary/15 border border-accent-primary/20 text-slate-200'
               : isError
@@ -65,18 +95,40 @@ export default function MessageBubble({
         >
           {isUser ? (
             <>
-              <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+              {userText && (
+                <p className="whitespace-pre-wrap text-sm leading-relaxed break-words overflow-wrap-anywhere">
+                  {userText}
+                </p>
+              )}
               {message.attachments && message.attachments.length > 0 && (
-                <div className="flex gap-2 mt-2 flex-wrap">
+                <div className="flex gap-2 mt-2 flex-wrap max-w-full">
                   {message.attachments.map((att, i) => (
                     att.type === 'image' ? (
-                      <img key={i} src={att.data} className="max-h-40 rounded-lg" />
+                      <div key={i} className="relative max-w-full">
+                        {att.isTruncated || imageErrors[i] ? (
+                          <div className="h-20 w-20 p-2 rounded-lg bg-white/[0.05] border border-white/10 flex items-center justify-center">
+                            <span className="text-[10px] text-slate-500 text-center leading-tight">
+                              {att.isTruncated ? '已归档' : '加载失败'}
+                            </span>
+                          </div>
+                        ) : (
+                          <img
+                            key={i}
+                            src={att.data}
+                            className="h-20 w-20 rounded-lg object-cover border border-white/10"
+                            loading="lazy"
+                            decoding="async"
+                            onError={() => handleImageError(i)}
+                            alt={att.name || '附件图片'}
+                          />
+                        )}
+                      </div>
                     ) : (
-                      <span key={i} className="text-xs text-slate-400 inline-flex items-center gap-1">
-                        <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <span key={i} className="text-xs text-slate-400 inline-flex items-center gap-1 max-w-[150px] truncate">
+                        <svg className="w-3 h-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                         </svg>
-                        {att.name}
+                        <span className="truncate">{att.name}</span>
                       </span>
                     )
                   ))}
@@ -87,7 +139,7 @@ export default function MessageBubble({
             <>
               <ThinkingBlock content={thinking} />
               <div
-                className="markdown-body text-sm"
+                className="markdown-body text-sm break-words overflow-wrap-anywhere"
                 dangerouslySetInnerHTML={{ __html: html || (isStreaming ? '<span class="animate-pulse-soft">▊</span>' : '') }}
               />
               {isStreaming && html && (
@@ -100,7 +152,6 @@ export default function MessageBubble({
         {/* 工具栏：版本切换 + 复制 + 重试（assistant 消息） */}
         {!isUser && !isStreaming && mainContent && (
           <div className="mt-1.5 flex items-center gap-1 text-xs text-slate-500">
-            {/* 版本切换 */}
             {versionCount > 1 && (
               <div className="flex items-center gap-0.5 mr-1">
                 <button
@@ -129,7 +180,6 @@ export default function MessageBubble({
               </div>
             )}
 
-            {/* 复制 */}
             <button
               onClick={handleCopy}
               className="flex items-center gap-1 p-1 rounded hover:bg-white/[0.05] hover:text-slate-300 transition-all opacity-0 group-hover:opacity-100"
@@ -144,7 +194,6 @@ export default function MessageBubble({
               )}
             </button>
 
-            {/* 重试 */}
             {showRetry && onRetry && (
               <button
                 onClick={onRetry}
@@ -157,25 +206,6 @@ export default function MessageBubble({
               </button>
             )}
           </div>
-        )}
-
-        {/* 用户消息悬浮复制 */}
-        {isUser && !isStreaming && message.content && (
-          <button
-            onClick={handleCopy}
-            className="absolute -bottom-6 right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 text-xs text-slate-500 hover:text-slate-300 flex items-center gap-1"
-          >
-            {copied ? (
-              <span className="text-emerald-400">已复制</span>
-            ) : (
-              <>
-                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                </svg>
-                复制
-              </>
-            )}
-          </button>
         )}
       </div>
 

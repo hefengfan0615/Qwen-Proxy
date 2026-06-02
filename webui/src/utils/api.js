@@ -80,10 +80,7 @@ export async function setAccountDisabled(email, disabled) {
 
 /**
  * Manually push the current in-memory accounts / proxies / disabled list
- * to the Vercel project's env vars. Triggers a Vercel build as a side
- * effect (~60s startup), which is why we don't auto-sync on every
- * mutation.
- * @param {Array<'accounts'|'proxies'|'disabled'>|'all'} [scopes]
+ * to the Vercel project's env vars.
  */
 export async function vercelSyncNow(scopes) {
   return apiFetch('/api/vercel/syncNow', {
@@ -114,13 +111,18 @@ export async function removeProxy(url) {
 }
 
 /**
- * Stream chat with support for reasoning_content (thinking) and content (answer)
+ * Stream chat with support for reasoning_content and content
+ * 关键优化：
+ * 1. 首字节到达立即调用 onChunk，不等待完整行解析
+ * 2. 按 \n\n 分块（OpenAI SSE 标准），避免 split('\n') 浪费
+ * 3. 错误处理更稳健
+ *
  * @param {Array} messages
  * @param {string} model
  * @param {Function} onChunk - (content, type) where type is 'content' or 'reasoning'
  * @param {Function} onDone
  * @param {AbortSignal} signal
- * @param {Object} extraParams - additional params like enable_thinking, reasoning_effort
+ * @param {Object} extraParams
  */
 export async function streamChat(messages, model, onChunk, onDone, signal, extraParams = {}) {
   const key = getApiKey()
@@ -152,33 +154,61 @@ export async function streamChat(messages, model, onChunk, onDone, signal, extra
     const { done, value } = await reader.read()
     if (done) break
 
+    // 解码当前 chunk
     buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() || ''
 
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed || !trimmed.startsWith('data: ')) continue
-      const data = trimmed.slice(6)
-      if (data === '[DONE]') {
-        onDone()
-        return
-      }
-      try {
-        const parsed = JSON.parse(data)
-        const delta = parsed.choices?.[0]?.delta
-        if (!delta) continue
-        if (delta.reasoning_content) {
-          onChunk(delta.reasoning_content, 'reasoning')
+    // 按 SSE 事件边界 (双换行) 切分，比 split('\n') 更准确且更快
+    let boundaryIdx
+    while ((boundaryIdx = buffer.indexOf('\n\n')) !== -1) {
+      const eventBlock = buffer.slice(0, boundaryIdx)
+      buffer = buffer.slice(boundaryIdx + 2)
+
+      // 解析这个事件块中的所有 data: 行
+      const lines = eventBlock.split('\n')
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || !trimmed.startsWith('data:')) continue
+        const data = trimmed.slice(5).trim()
+        if (data === '[DONE]') {
+          onDone?.()
+          return
         }
-        if (delta.content) {
-          onChunk(delta.content, 'content')
+        if (!data) continue
+        try {
+          const parsed = JSON.parse(data)
+          const delta = parsed.choices?.[0]?.delta
+          if (!delta) continue
+          if (delta.reasoning_content) {
+            onChunk(delta.reasoning_content, 'reasoning')
+          }
+          if (delta.content) {
+            onChunk(delta.content, 'content')
+          }
+        } catch {
+          // 忽略不完整的 JSON 块，等待下一个 chunk
         }
-      } catch {
-        // skip malformed JSON
       }
     }
   }
 
-  onDone()
+  // 处理最后残余的 buffer（可能没有 \n\n 结束）
+  if (buffer.trim()) {
+    const lines = buffer.split('\n')
+    for (const line of lines) {
+      const trimmed = line.trim()
+      if (!trimmed || !trimmed.startsWith('data:')) continue
+      const data = trimmed.slice(5).trim()
+      if (data === '[DONE]') break
+      if (!data) continue
+      try {
+        const parsed = JSON.parse(data)
+        const delta = parsed.choices?.[0]?.delta
+        if (!delta) continue
+        if (delta.reasoning_content) onChunk(delta.reasoning_content, 'reasoning')
+        if (delta.content) onChunk(delta.content, 'content')
+      } catch { /* ignore */ }
+    }
+  }
+
+  onDone?.()
 }

@@ -89,7 +89,25 @@
 
 /* Markdown content styles */
 .markdown-body {
-  @apply text-slate-200 leading-relaxed;
+  @apply text-slate-200 leading-relaxed break-words overflow-wrap-anywhere;
+}
+
+.markdown-body pre,
+.markdown-body code {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  max-width: 100%;
+}
+
+.markdown-body table {
+  table-layout: fixed;
+  word-break: break-word;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
 }
 
 .markdown-body h1 { @apply text-2xl font-bold mt-6 mb-3 text-white; }
