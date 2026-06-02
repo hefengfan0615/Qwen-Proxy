@@ -1,4 +1,5 @@
 const express = require('express')
+const multer = require('multer')
 const router = express.Router()
 const { validateApiKey } = require('../middlewares/authorization.js')
 const { processRequestBody } = require('../middlewares/chat-middleware.js')
@@ -7,6 +8,13 @@ const { sendChatRequest } = require('../utils/request.js')
 const { parseToolCallsFromText } = require('../utils/toolcall.js')
 const { logger } = require('../utils/logger')
 const config = require('../config/index.js')
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 100 * 1024 * 1024
+  }
+})
 
 /**
  * Gemini API key verification middleware
@@ -47,7 +55,61 @@ function extractModelFromParam(modelParam) {
  */
 const handleGenerateContent = async (req, res) => {
   try {
-    const geminiBody = req.body
+    // Handle both application/json and multipart/form-data requests
+    let geminiBody = req.body
+    if (req.is('multipart/form-data') && req.body.data) {
+      try {
+        geminiBody = JSON.parse(req.body.data)
+      } catch (e) {
+        logger.error('Failed to parse form-data JSON', 'GEMINI', '', e)
+      }
+    }
+
+    // Process uploaded files if any
+    if (req.files && req.files.length > 0) {
+      if (!geminiBody.contents) {
+        geminiBody.contents = []
+      }
+
+      // Find last user content
+      let lastUserContent = null
+      for (let i = geminiBody.contents.length - 1; i >= 0; i--) {
+        if (geminiBody.contents[i].role !== 'model') {
+          lastUserContent = geminiBody.contents[i]
+          break
+        }
+      }
+
+      // If no user content, create one
+      if (!lastUserContent) {
+        lastUserContent = { role: 'user', parts: [] }
+        geminiBody.contents.push(lastUserContent)
+      }
+
+      // Ensure parts array exists
+      if (!lastUserContent.parts) {
+        lastUserContent.parts = []
+      }
+
+      // Add each file to the message
+      for (const file of req.files) {
+        const base64Data = file.buffer.toString('base64')
+        if (file.mimetype.startsWith('image/')) {
+          lastUserContent.parts.push({
+            inline_data: {
+              mime_type: file.mimetype,
+              data: base64Data
+            }
+          })
+        } else if (file.mimetype.startsWith('video/')) {
+          // For video, we can add it as text note for now
+          lastUserContent.parts.push({
+            text: `[Video file: ${file.originalname || file.filename}]`
+          })
+        }
+      }
+    }
+
     const urlModel = extractModelFromParam(req.params.model)
 
     // Convert Gemini request to OpenAI format
@@ -89,7 +151,61 @@ const handleGenerateContent = async (req, res) => {
  */
 const handleStreamGenerateContent = async (req, res) => {
   try {
-    const geminiBody = req.body
+    // Handle both application/json and multipart/form-data requests
+    let geminiBody = req.body
+    if (req.is('multipart/form-data') && req.body.data) {
+      try {
+        geminiBody = JSON.parse(req.body.data)
+      } catch (e) {
+        logger.error('Failed to parse form-data JSON', 'GEMINI', '', e)
+      }
+    }
+
+    // Process uploaded files if any
+    if (req.files && req.files.length > 0) {
+      if (!geminiBody.contents) {
+        geminiBody.contents = []
+      }
+
+      // Find last user content
+      let lastUserContent = null
+      for (let i = geminiBody.contents.length - 1; i >= 0; i--) {
+        if (geminiBody.contents[i].role !== 'model') {
+          lastUserContent = geminiBody.contents[i]
+          break
+        }
+      }
+
+      // If no user content, create one
+      if (!lastUserContent) {
+        lastUserContent = { role: 'user', parts: [] }
+        geminiBody.contents.push(lastUserContent)
+      }
+
+      // Ensure parts array exists
+      if (!lastUserContent.parts) {
+        lastUserContent.parts = []
+      }
+
+      // Add each file to the message
+      for (const file of req.files) {
+        const base64Data = file.buffer.toString('base64')
+        if (file.mimetype.startsWith('image/')) {
+          lastUserContent.parts.push({
+            inline_data: {
+              mime_type: file.mimetype,
+              data: base64Data
+            }
+          })
+        } else if (file.mimetype.startsWith('video/')) {
+          // For video, we can add it as text note for now
+          lastUserContent.parts.push({
+            text: `[Video file: ${file.originalname || file.filename}]`
+          })
+        }
+      }
+    }
+
     const urlModel = extractModelFromParam(req.params.model)
 
     // Convert Gemini request to OpenAI format
@@ -212,11 +328,11 @@ function accumulateResponse(response, toolcallEnabled = false) {
 }
 
 // Routes - Gemini v1beta
-router.post('/v1beta/models/:model\\:generateContent', geminiKeyVerify, handleGenerateContent)
-router.post('/v1beta/models/:model\\:streamGenerateContent', geminiKeyVerify, handleStreamGenerateContent)
+router.post('/v1beta/models/:model\\:generateContent', geminiKeyVerify, upload.any(), handleGenerateContent)
+router.post('/v1beta/models/:model\\:streamGenerateContent', geminiKeyVerify, upload.any(), handleStreamGenerateContent)
 
 // Routes - Gemini v1
-router.post('/v1/models/:model\\:generateContent', geminiKeyVerify, handleGenerateContent)
-router.post('/v1/models/:model\\:streamGenerateContent', geminiKeyVerify, handleStreamGenerateContent)
+router.post('/v1/models/:model\\:generateContent', geminiKeyVerify, upload.any(), handleGenerateContent)
+router.post('/v1/models/:model\\:streamGenerateContent', geminiKeyVerify, upload.any(), handleStreamGenerateContent)
 
 module.exports = router

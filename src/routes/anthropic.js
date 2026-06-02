@@ -1,4 +1,5 @@
 const express = require('express')
+const multer = require('multer')
 const router = express.Router()
 const { validateApiKey } = require('../middlewares/authorization.js')
 const { processRequestBody } = require('../middlewares/chat-middleware.js')
@@ -8,6 +9,13 @@ const { sendChatRequest } = require('../utils/request.js')
 const { parseToolCallsFromText } = require('../utils/toolcall.js')
 const { logger } = require('../utils/logger')
 const config = require('../config/index.js')
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 100 * 1024 * 1024
+  }
+})
 
 /**
  * Anthropic API key verification middleware
@@ -40,7 +48,66 @@ const anthropicKeyVerify = (req, res, next) => {
  */
 const handleAnthropicMessages = async (req, res) => {
   try {
-    const anthropicBody = req.body
+    // Handle both application/json and multipart/form-data requests
+    let anthropicBody = req.body
+    if (req.is('multipart/form-data') && req.body.data) {
+      try {
+        anthropicBody = JSON.parse(req.body.data)
+      } catch (e) {
+        logger.error('Failed to parse form-data JSON', 'ANTHROPIC', '', e)
+      }
+    }
+
+    // Process uploaded files if any
+    if (req.files && req.files.length > 0) {
+      if (!anthropicBody.messages) {
+        anthropicBody.messages = []
+      }
+
+      // Convert uploaded files to base64 data URL and add to last user message
+      let lastUserMessage = null
+      for (let i = anthropicBody.messages.length - 1; i >= 0; i--) {
+        if (anthropicBody.messages[i].role === 'user') {
+          lastUserMessage = anthropicBody.messages[i]
+          break
+        }
+      }
+
+      // If no user message, create one
+      if (!lastUserMessage) {
+        lastUserMessage = { role: 'user', content: [] }
+        anthropicBody.messages.push(lastUserMessage)
+      }
+
+      // Convert content to array if it's a string
+      if (typeof lastUserMessage.content === 'string') {
+        lastUserMessage.content = [{ type: 'text', text: lastUserMessage.content }]
+      } else if (!Array.isArray(lastUserMessage.content)) {
+        lastUserMessage.content = []
+      }
+
+      // Add each file to the message
+      for (const file of req.files) {
+        const base64Data = file.buffer.toString('base64')
+        if (file.mimetype.startsWith('image/')) {
+          lastUserMessage.content.push({
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: file.mimetype,
+              data: base64Data
+            }
+          })
+        } else if (file.mimetype.startsWith('video/')) {
+          // For video, we can add it as text note for now
+          lastUserMessage.content.push({
+            type: 'text',
+            text: `[Video file: ${file.originalname || file.filename}]`
+          })
+        }
+      }
+    }
+
     const requestedModel = anthropicBody.model || 'qwen3.6-plus'
     const isStream = anthropicBody.stream || false
 
@@ -205,7 +272,7 @@ function accumulateResponse(response, enable_thinking, toolcallEnabled = false) 
 }
 
 // Routes
-router.post('/v1/messages', anthropicKeyVerify, handleAnthropicMessages)
-router.post('/anthropic/v1/messages', anthropicKeyVerify, handleAnthropicMessages)
+router.post('/v1/messages', anthropicKeyVerify, upload.any(), handleAnthropicMessages)
+router.post('/anthropic/v1/messages', anthropicKeyVerify, upload.any(), handleAnthropicMessages)
 
 module.exports = router
